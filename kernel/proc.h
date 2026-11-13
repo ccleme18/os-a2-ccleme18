@@ -82,6 +82,12 @@ enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 struct proc {
   struct spinlock lock;
   int tracemask;	// Bitmask of system calls to trace
+  int level;            // Current MLFQ priority (0-3)
+  int runticks;         // Total timer ticks charged
+  int nsched;           // Number of times scheduled
+  int ctime;            // Process creation time
+  int levelticks;       // Ticks used at current priority level
+
 
   // p->lock must be held when using these:
   enum procstate state; // Process state

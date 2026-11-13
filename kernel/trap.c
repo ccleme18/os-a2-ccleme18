@@ -81,9 +81,10 @@ usertrap(void)
   if (killed(p))
     kexit(-1);
 
-  // give up the CPU if this is a timer interrupt.
-  if (which_dev == 2)
+    // Apply MLFQ timer accounting and determine whether to yield.
+  if (which_dev == 2 && mlfq_tick(p)) {
     yield();
+  }
 
   prepare_return();
 
@@ -153,9 +154,13 @@ kerneltrap()
     panic("kerneltrap");
   }
 
-  // give up the CPU if this is a timer interrupt.
-  if (which_dev == 2 && myproc() != 0)
-    yield();
+  // Charge timer tick to the current process.
+  if (which_dev == 2 && myproc() != 0) {
+    struct proc *p = myproc();
+
+    if (mlfq_tick(p))
+      yield();
+  }
 
   // the yield() may have caused some traps to occur,
   // so restore trap registers for use by kernelvec.S's sepc instruction.
@@ -170,12 +175,14 @@ clockintr()
     acquire(&tickslock);
     ticks++;
     wakeup(&ticks);
+
+    if (ticks % 64 == 0)
+      mlfq_boost();
+
     release(&tickslock);
   }
 
-  // ask for the next timer interrupt. this also clears
-  // the interrupt request. 1000000 is about a tenth
-  // of a second.
+  // Ask for the next timer interrupt.
   w_stimecmp(r_time() + 1000000);
 }
 

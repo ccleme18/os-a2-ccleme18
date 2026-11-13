@@ -30,6 +30,9 @@ struct sysinfo;
 int sysinfo(struct sysinfo *);
 struct uproc;
 int getprocs(struct uproc *buf, int max);
+struct pinfo;
+int getpinfo(struct pinfo *buf, int max);
+
 
 // ulib.c
 int stat(const char *, struct stat *);

@@ -95,6 +95,8 @@ struct cpu*     mycpu(void);
 struct proc*    myproc();
 void            procinit(void);
 void            scheduler(void) __attribute__((noreturn));
+int             mlfq_tick(struct proc *);
+void            mlfq_boost(void);
 void            sched(void);
 void            sleep_prepare(void*);
 void            sleep(void);
@@ -107,6 +109,7 @@ int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
 uint64 		nproc(void);
 uint64 		sys_getprocs(void);
+uint64                sys_getpinfo(void);
 
 // swtch.S
 void            swtch(struct context*, struct context*);

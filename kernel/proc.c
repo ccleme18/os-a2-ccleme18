@@ -6,10 +6,14 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "pinfo.h"
 
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
+// Last process selected at each MLFQ priority level.
+static int mlfq_cursor[4] = {-1, -1, -1, -1};
+static struct spinlock mlfq_cursor_lock;
 
 struct proc *initproc;
 
@@ -52,6 +56,7 @@ procinit(void)
 
   initlock(&pid_lock, "nextpid");
   initlock(&wait_lock, "wait_lock");
+  initlock(&mlfq_cursor_lock, "mlfq_cursor");
   for (p = proc; p < &proc[NPROC]; p++) {
     initlock(&p->lock, "proc");
     p->state = UNUSED;
@@ -126,6 +131,12 @@ found:
   p->pid = allocpid();
   p->state = USED;
 
+  // Initialize MLFQ scheduling information.
+  p->level = 0;
+  p->runticks = 0;
+  p->nsched = 0;
+  p->ctime = ticks;
+  p->levelticks = 0;
   // Allocate a trapframe page.
   if ((p->trapframe = (struct trapframe *)kalloc()) == 0) {
     freeproc(p);
@@ -437,37 +448,50 @@ scheduler(void)
 
   c->proc = 0;
   for (;;) {
-    // The most recent process to run may have had interrupts
-    // turned off; enable them to avoid a deadlock if all
-    // processes are waiting. Then turn them back off
-    // to avoid a possible race between an interrupt
-    // and wfi.
     intr_on();
     intr_off();
 
     int found = 0;
-    for (p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
-      if (p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
 
-        // Don't re-enable interrupts on release.
-        mycpu()->intena = 0;
+    // Coordinate process selection and cursor updates across CPUs.
+    acquire(&mlfq_cursor_lock);
 
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+    // Search from highest priority (0) to lowest priority (3).
+    for (int level = 0; level < 4; level++) {
+      int start = mlfq_cursor[level];
+
+      // Search circularly, beginning just after the last selection.
+      for (int offset = 1; offset <= NPROC; offset++) {
+        int index = (start + offset + NPROC) % NPROC;
+        p = &proc[index];
+
+        acquire(&p->lock);
+        if (p->state == RUNNABLE && p->level == level) {
+          p->state = RUNNING;
+          p->nsched++;
+          mlfq_cursor[level] = index;
+          c->proc = p;
+
+          // Keep only p->lock held across the context switch.
+          release(&mlfq_cursor_lock);
+          swtch(&c->context, &p->context);
+
+          mycpu()->intena = 0;
+          c->proc = 0;
+          release(&p->lock);
+
+          found = 1;
+          break;
+        }
+        release(&p->lock);
       }
-      release(&p->lock);
+
+      if (found)
+        break;
     }
-    if (found == 0) {
-      // nothing to run; stop running on this core until an interrupt.
+
+    if (!found) {
+      release(&mlfq_cursor_lock);
       asm volatile("wfi");
     }
   }
@@ -769,4 +793,106 @@ sys_getprocs(void)
   }
 
   return count;
+}
+
+uint64
+sys_getpinfo(void)
+{
+  uint64 addr;
+  int max;
+  int count = 0;
+  struct proc *p;
+  struct proc *curproc = myproc();
+
+  argaddr(0, &addr);
+  argint(1, &max);
+
+  if (max < 0)
+    return -1;
+
+  for (p = proc; p < &proc[NPROC] && count < max; p++) {
+    struct pinfo info;
+
+    acquire(&p->lock);
+
+    if (p->state == UNUSED) {
+      release(&p->lock);
+      continue;
+    }
+
+    info.pid = p->pid;
+    info.state = p->state;
+    info.level = p->level;
+    info.runticks = p->runticks;
+    info.nsched = p->nsched;
+    info.ctime = p->ctime;
+    safestrcpy(info.name, p->name, sizeof(info.name));
+
+    release(&p->lock);
+
+    if (copyout(curproc->pagetable, curproc->sz,
+                addr + count * sizeof(info), (char *)&info,
+                sizeof(info)) < 0)
+      return -1;
+
+    count++;
+  }
+
+  return count;
+}
+
+// Charge one timer tick to a process and determine whether it should yield.
+int
+mlfq_tick(struct proc *p)
+{
+  int level;
+  int slice[4] = {1, 2, 4, 8};
+
+  // Charge the process for this timer tick.
+  acquire(&p->lock);
+  p->runticks++;
+  p->levelticks++;
+
+  level = p->level;
+
+  // Check whether the process has used its entire time slice.
+  if (p->levelticks >= slice[level]) {
+    if (p->level < 3)
+      p->level++;
+
+    p->levelticks = 0;
+    release(&p->lock);
+    return 1;
+  }
+
+  release(&p->lock);
+
+  // Check whether a higher-priority process is ready to run.
+  for (int i = 0; i < NPROC; i++) {
+    acquire(&proc[i].lock);
+
+    if (proc[i].state == RUNNABLE && proc[i].level < level) {
+      release(&proc[i].lock);
+      return 1;
+    }
+
+    release(&proc[i].lock);
+  }
+
+  return 0;
+}
+// Promote all processes to the highest priority level.
+void
+mlfq_boost(void)
+{
+  for (int i = 0; i < NPROC; i++) {
+    acquire(&proc[i].lock);
+
+    if (proc[i].state != UNUSED) {
+      proc[i].level = 0;
+      proc[i].levelticks = 0;
+    }
+
+    release(&proc[i].lock);
+  }
 }

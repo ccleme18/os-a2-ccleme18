@@ -46,3 +46,4 @@ entry("sync");
 entry("trace");
 entry("sysinfo");
 entry("getprocs");
+entry("getpinfo");
